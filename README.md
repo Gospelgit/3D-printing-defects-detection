@@ -4,14 +4,23 @@ Dataset can be used for advancing quality control methods and quality control, p
 The Peregrine dataset includes the following defect classes:
 
 Recoater Hopping: Ripples from recoater impacts with parts
+
 Recoater Streaking: Lines from damaged recoater or dragging particles
+
 Incomplete Spreading: Insufficient powder spread
+
 Swelling: Distortion/warping of printed material above powder level
+
 Debris: Small-to-medium disturbances in the powder bed
+
 Super-Elevation: Lack of powder coverage over printed regions
+
 Spatter: Ejecta from the weld pool landed on powder bed
+
 Misprint: Printed material outside intended geometries
+
 Over Melting: Regions melted with excessive energy density
+
 Under Melting: Regions melted with insufficient energy density
 
 **Data Collection Details**:
