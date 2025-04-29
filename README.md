@@ -31,7 +31,8 @@ Manufacturing Process: Laser Powder Bed Fusion (L-PBF) using Concept Laser M2 ma
 
 Material: Stainless Steel 316L
 
-Scope: 5 separate builds containing 6,299 individually tracked SS-J3 tensile coupons
+Scope: 2 separate builds 
+
 
 
 
