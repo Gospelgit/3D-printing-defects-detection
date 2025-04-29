@@ -1,323 +1,257 @@
 import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, concatenate
-from tensorflow.keras.optimizers import Adam
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-import h5py
+import json
+import cv2
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.layers import Conv2D, Reshape, Concatenate, Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
 
-# U-Net model definitions
-def build_unet(input_size=(256, 256, 1), num_classes=12):
-    inputs = Input(input_size)
+# Define object detection model (simplified example using RetinaNet-like approach)
+def build_detection_model(input_size=(416, 416, 3), num_classes=1):
+    """
+    Build a simplified object detection model based on RetinaNet concepts
     
-    # Encoder
-    conv1 = Conv2D(64, 3, activation='relu', padding='same')(inputs)
-    conv1 = Conv2D(64, 3, activation='relu', padding='same')(conv1)
-    pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+    Args:
+        input_size: Input image dimensions
+        num_classes: Number of object classes to detect
+    """
+    # Base feature extractor (ResNet50)
+    inputs = Input(shape=input_size)
+    base_model = ResNet50(include_top=False, weights='imagenet', input_tensor=inputs)
     
-    conv2 = Conv2D(128, 3, activation='relu', padding='same')(pool1)
-    conv2 = Conv2D(128, 3, activation='relu', padding='same')(conv2)
-    pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+    # Feature Pyramid Network (simplified)
+    C5 = base_model.output
+    P5 = Conv2D(256, kernel_size=1, strides=1, padding='same')(C5)
     
-    conv3 = Conv2D(256, 3, activation='relu', padding='same')(pool2)
-    conv3 = Conv2D(256, 3, activation='relu', padding='same')(conv3)
-    pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
+    # Detection head
+    bbox_features = Conv2D(256, kernel_size=3, strides=1, padding='same', activation='relu')(P5)
+    bbox_features = Conv2D(256, kernel_size=3, strides=1, padding='same', activation='relu')(bbox_features)
     
-    # Bottom
-    conv4 = Conv2D(512, 3, activation='relu', padding='same')(pool3)
-    conv4 = Conv2D(512, 3, activation='relu', padding='same')(conv4)
+    # Outputs: [x, y, width, height, objectness, class_probs...]
+    num_anchors = 9  # 3 scales × 3 aspect ratios
+    detection_outputs = Conv2D(num_anchors * (5 + num_classes), kernel_size=3, padding='same')(bbox_features)
+    output_shape = tf.concat([tf.shape(detection_outputs)[:-1], [num_anchors, 5 + num_classes]], axis=0)
+    detection_outputs = Reshape((-1, 5 + num_classes))(detection_outputs)
     
-    # Decoder
-    up5 = concatenate([UpSampling2D(size=(2, 2))(conv4), conv3], axis=-1)
-    conv5 = Conv2D(256, 3, activation='relu', padding='same')(up5)
-    conv5 = Conv2D(256, 3, activation='relu', padding='same')(conv5)
-    
-    up6 = concatenate([UpSampling2D(size=(2, 2))(conv5), conv2], axis=-1)
-    conv6 = Conv2D(128, 3, activation='relu', padding='same')(up6)
-    conv6 = Conv2D(128, 3, activation='relu', padding='same')(conv6)
-    
-    up7 = concatenate([UpSampling2D(size=(2, 2))(conv6), conv1], axis=-1)
-    conv7 = Conv2D(64, 3, activation='relu', padding='same')(up7)
-    conv7 = Conv2D(64, 3, activation='relu', padding='same')(conv7)
-    
-    # Output layer
-    outputs = Conv2D(num_classes, 1, activation='softmax')(conv7)
-    
-    model = Model(inputs=inputs, outputs=outputs)
+    model = Model(inputs, detection_outputs)
     return model
 
-# Loading all datasets from HDF5 files
-def load_all_hdf5_datasets(hdf5_files, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42):
+# Load COCO format annotations
+def load_coco_dataset(dataset_dir, annotation_file='_annotations.coco.json'):
     """
-    Load all datasets from HDF5 files and split into train, val, and test sets
+    Load dataset in COCO format
     
     Args:
-        hdf5_files: List of HDF5 file paths
-        train_ratio, val_ratio, test_ratio: Ratios for splitting the data
-        seed: Random seed for reproducibility
-    
-    Returns:
-        Dictionary containing train, val, and test datasets
+        dataset_dir: Directory containing images and annotations
+        annotation_file: COCO format annotation filename
     """
-    np.random.seed(seed)
+    # Load annotations
+    with open(os.path.join(dataset_dir, annotation_file)) as f:
+        coco_data = json.load(f)
     
+    # Process images and annotations
+    images = []
+    annotations = []
     
-    all_images = []
-    all_masks = []
+    # Create lookup dictionaries
+    image_dict = {img['id']: img for img in coco_data['images']}
+    categories = {cat['id']: cat['name'] for cat in coco_data['categories']}
     
-    # Loading data from each HDF5 file
-    for hdf5_file in hdf5_files:
-        print(f"Loading dataset from {hdf5_file}...")
-        try:
-            with h5py.File(hdf5_file, 'r') as f:
-
-                # Exploring the structure of the HDF5 file
-                print(f"HDF5 file structure: {list(f.keys())}")
+    # Group annotations by image
+    annotations_by_image = {}
+    for ann in coco_data['annotations']:
+        img_id = ann['image_id']
+        if img_id not in annotations_by_image:
+            annotations_by_image[img_id] = []
+        annotations_by_image[img_id].append(ann)
+    
+    # Process each image and its annotations
+    for img_id, img_info in image_dict.items():
+        img_path = os.path.join(dataset_dir, 'train', img_info['file_name'])
+        if not os.path.exists(img_path):
+            img_path = os.path.join(dataset_dir, 'valid', img_info['file_name'])
+            if not os.path.exists(img_path):
+                img_path = os.path.join(dataset_dir, 'test', img_info['file_name'])
+        
+        if os.path.exists(img_path):
+            # Load and preprocess image
+            img = cv2.imread(img_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = cv2.resize(img, (416, 416))
+            img = img.astype(np.float32) / 255.0
+            
+            # Get annotations for this image
+            img_annotations = annotations_by_image.get(img_id, [])
+            boxes = []
+            for ann in img_annotations:
+                # COCO format: [x, y, width, height]
+                bbox = ann['bbox']
+                category_id = ann['category_id']
                 
-              
-                if 'images' in f and 'masks' in f:
-                    images = f['images'][:]
-                    masks = f['masks'][:]
-                    
-                    # Normalizing images to [0,1] range
-                    images = images.astype(np.float32) / 255.0
-                    
-                    # Adding channel dimension if not present
-                    if len(images.shape) == 3:  # (num_samples, height, width)
-                        images = np.expand_dims(images, axis=-1)
-                   
+                # Convert to [x_min, y_min, x_max, y_max, class_id]
+                x_min = bbox[0]
+                y_min = bbox[1]
+                x_max = bbox[0] + bbox[2]
+                y_max = bbox[1] + bbox[3]
+                
+                # Normalize coordinates (0-1)
+                x_min = x_min / img_info['width']
+                y_min = y_min / img_info['height']
+                x_max = x_max / img_info['width']
+                y_max = y_max / img_info['height']
+                
+                boxes.append([x_min, y_min, x_max, y_max, category_id])
+            
+            images.append(img)
+            annotations.append(np.array(boxes))
+    
+    return np.array(images), annotations, categories
 
-                    if len(masks.shape) == 3:  # (num_samples, height, width)
-                        # Assuming masks contain class indices
-                        masks_one_hot = tf.keras.utils.to_categorical(masks, num_classes=12)
-                    elif len(masks.shape) == 4 and masks.shape[-1] == 12:
-                        # Masks are already one-hot encoded
-                        masks_one_hot = masks
-                    else:
-                        raise ValueError(f"Unexpected mask shape: {masks.shape}")
-                    
-                    all_images.append(images)
-                    all_masks.append(masks_one_hot)
-                    
-                    print(f"Loaded {images.shape[0]} samples from {hdf5_file}")
-                else:
-                    print(f"Warning: Expected 'images' and 'masks' datasets not found in {hdf5_file}")
-                    # Try to find the actual dataset keys
-                    print(f"Available keys: {list(f.keys())}")
-                    
-        except Exception as e:
-            print(f"Error loading {hdf5_file}: {str(e)}")
+# Visualization function
+def visualize_predictions(image, true_boxes, pred_boxes, categories, threshold=0.5):
+    """
+    Visualize detection predictions
     
-    # Combine all data
-    if all_images and all_masks:
-        all_images = np.vstack(all_images)
-        all_masks = np.vstack(all_masks)
-        print(f"Combined dataset: {all_images.shape[0]} samples")
-    else:
-        raise ValueError("No data was loaded from the HDF5 files")
+    Args:
+        image: Input image (normalized 0-1)
+        true_boxes: Ground truth boxes [x_min, y_min, x_max, y_max, class_id]
+        pred_boxes: Predicted boxes [x_min, y_min, x_max, y_max, objectness, class_probs...]
+        categories: Dictionary mapping category IDs to names
+        threshold: Confidence threshold for showing predictions
+    """
+    plt.figure(figsize=(10, 10))
     
-    # Shuffling and split the data
-    indices = np.arange(all_images.shape[0])
+    # Convert image back to 0-255 range if normalized
+    if image.max() <= 1.0:
+        image = (image * 255).astype(np.uint8)
+    
+    plt.imshow(image)
+    
+    # Plot ground truth boxes
+    for box in true_boxes:
+        x_min, y_min, x_max, y_max, class_id = box
+        width = x_max - x_min
+        height = y_max - y_min
+        
+        # Convert normalized coordinates to pixel values
+        x_min = int(x_min * image.shape[1])
+        y_min = int(y_min * image.shape[0])
+        width = int(width * image.shape[1])
+        height = int(height * image.shape[0])
+        
+        rect = plt.Rectangle((x_min, y_min), width, height, 
+                            fill=False, edgecolor='green', linewidth=2)
+        plt.gca().add_patch(rect)
+        plt.text(x_min, y_min - 5, categories[class_id], 
+                color='green', fontsize=10, backgroundcolor='black')
+    
+    # Plot predicted boxes
+    for box in pred_boxes:
+        if box[4] > threshold:  # Check objectness confidence
+            x_min, y_min, x_max, y_max = box[:4]
+            objectness = box[4]
+            class_id = np.argmax(box[5:])
+            class_prob = box[5 + class_id]
+            confidence = objectness * class_prob
+            
+            width = x_max - x_min
+            height = y_max - y_min
+            
+            # Convert normalized coordinates to pixel values
+            x_min = int(x_min * image.shape[1])
+            y_min = int(y_min * image.shape[0])
+            width = int(width * image.shape[1])
+            height = int(height * image.shape[0])
+            
+            rect = plt.Rectangle((x_min, y_min), width, height, 
+                                fill=False, edgecolor='red', linewidth=2)
+            plt.gca().add_patch(rect)
+            plt.text(x_min, y_min - 5, 
+                    f"{categories[class_id]} {confidence:.2f}", 
+                    color='red', fontsize=10, backgroundcolor='black')
+    
+    plt.axis('off')
+    return plt
+
+# Main function to train and evaluate
+def train_and_evaluate_model(dataset_dir, epochs=50, batch_size=8):
+    """
+    Train and evaluate the detection model
+    
+    Args:
+        dataset_dir: Directory containing the dataset
+        epochs: Number of training epochs
+        batch_size: Batch size for training
+    """
+    # Load dataset
+    images, annotations, categories = load_coco_dataset(dataset_dir)
+    
+    # Split dataset
+    indices = np.arange(len(images))
     np.random.shuffle(indices)
     
-    train_end = int(train_ratio * len(indices))
-    val_end = train_end + int(val_ratio * len(indices))
+    train_split = int(0.7 * len(indices))
+    val_split = int(0.85 * len(indices))
     
-    train_indices = indices[:train_end]
-    val_indices = indices[train_end:val_end]
-    test_indices = indices[val_end:]
+    train_indices = indices[:train_split]
+    val_indices = indices[train_split:val_split]
+    test_indices = indices[val_split:]
     
-    # Creating the train, val, and test sets
-    X_train = all_images[train_indices]
-    y_train = all_masks[train_indices]
+    X_train = images[train_indices]
+    y_train = [annotations[i] for i in train_indices]
     
-    X_val = all_images[val_indices]
-    y_val = all_masks[val_indices]
+    X_val = images[val_indices]
+    y_val = [annotations[i] for i in val_indices]
     
-    X_test = all_images[test_indices]
-    y_test = all_masks[test_indices]
+    X_test = images[test_indices]
+    y_test = [annotations[i] for i in test_indices]
     
-    print(f"Split into {X_train.shape[0]} training, {X_val.shape[0]} validation, {X_test.shape[0]} test samples")
+    # Build model
+    model = build_detection_model(input_size=(416, 416, 3), num_classes=len(categories))
     
-    return {
-        'train': {'images': X_train, 'masks': y_train},
-        'val': {'images': X_val, 'masks': y_val},
-        'test': {'images': X_test, 'masks': y_test}
-    }
-
-# Process model training, validation and testing
-def train_and_evaluate_model(hdf5_files, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
-    """
-    Main function to train, validate and test the segmentation model using HDF5 datasets
-    
-    Args:
-        hdf5_files: List of HDF5 file paths
-        train_ratio, val_ratio, test_ratio: Ratios for splitting the data
-    """
-    # Load all datasets
-    print("Loading all datasets...")
-    all_data = load_all_hdf5_datasets(hdf5_files, train_ratio, val_ratio, test_ratio)
-    
-    # Extract train, val, and test sets
-    X_train = all_data['train']['images']
-    y_train = all_data['train']['masks']
-    X_val = all_data['val']['images']
-    y_val = all_data['val']['masks']
-    X_test = all_data['test']['images']
-    y_test = all_data['test']['masks']
-    
-    print(f"Dataset loaded: {X_train.shape[0]} training, {X_val.shape[0]} validation, {X_test.shape[0]} test samples")
-    print(f"Image shape: {X_train.shape[1:]}, Mask shape: {y_train.shape[1:]}")
-    
-    # Build and compile model
-    input_shape = X_train.shape[1:]
-    model = build_unet(input_size=input_shape, num_classes=12)
+    # Compile model (Note: this is simplified - actual detection models use complex loss functions)
     model.compile(
         optimizer=Adam(learning_rate=1e-4),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
+        loss='mse',  # This is oversimplified - should use proper detection loss
+        metrics=['accuracy']  # Also oversimplified
     )
     
-    # Show model summary
+    # Train model (Note: This is a placeholder - actual implementation would need a custom training loop)
+    # model.fit(...)
+    
+    # Display model architecture
     model.summary()
     
-    # Train the model
-    print("Training the model...")
-    history = model.fit(
-        X_train, y_train,
-        batch_size=8,
-        epochs=50,
-        validation_data=(X_val, y_val),
-        callbacks=[
-            tf.keras.callbacks.ModelCheckpoint(
-                'best_model.h5', 
-                save_best_only=True, 
-                monitor='val_loss'
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss', 
-                factor=0.5, 
-                patience=5
-            ),
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=10,
-                restore_best_weights=True
-            )
-        ]
-    )
+    print("Note: This code example is a simplified framework.")
+    print("A complete implementation would require custom loss functions, anchor generation,")
+    print("non-maximum suppression, and other object detection components.")
     
-    # Plot training history
-    plt.figure(figsize=(12, 5))
-    plt.subplot(121)
-    plt.plot(history.history['loss'], label='Training Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Training and Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    
-    plt.subplot(122)
-    plt.plot(history.history['accuracy'], label='Training Accuracy')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-    plt.title('Training and Validation Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig('training_history.png')
-    plt.close()
-    
-    # Load the best model for evaluation
-    model.load_weights('best_model.h5')
-    
-    # Evaluating on test set
-    print("Evaluating on test set...")
-    test_loss, test_accuracy = model.evaluate(X_test, y_test, verbose=1)
-    print(f"Test Loss: {test_loss:.4f}")
-    print(f"Test Accuracy: {test_accuracy:.4f}")
-    
-    # Calculating IoU for each class
-    print("Calculating IoU metrics...")
-    y_pred = model.predict(X_test)
-    y_pred_classes = np.argmax(y_pred, axis=-1)
-    y_true_classes = np.argmax(y_test, axis=-1)
-    
-    def calculate_iou(y_true, y_pred, class_id):
-        true_mask = (y_true == class_id).flatten()
-        pred_mask = (y_pred == class_id).flatten()
-        
-        intersection = np.logical_and(true_mask, pred_mask).sum()
-        union = np.logical_or(true_mask, pred_mask).sum()
-        
-        iou = intersection / union if union > 0 else 0
-        return iou
-    
-    # Calculating mean IoU across all classes
-    class_ious = []
-    for class_id in range(12):
-        class_iou = calculate_iou(y_true_classes, y_pred_classes, class_id)
-        class_ious.append(class_iou)
-        print(f"IoU for class {class_id}: {class_iou:.4f}")
-    
-    mean_iou = np.mean(class_ious)
-    print(f"Mean IoU: {mean_iou:.4f}")
-    
-    # Saving some test predictions
-    print("Generating prediction visualizations...")
-    os.makedirs('predictions', exist_ok=True)
-    n_samples = min(10, len(X_test))
-    for i in range(n_samples):
-        pred = model.predict(np.expand_dims(X_test[i], axis=0))[0]
-        pred_mask = np.argmax(pred, axis=-1)
-        
-        true_mask = np.argmax(y_test[i], axis=-1)
-        
-        plt.figure(figsize=(15, 5))
-        plt.subplot(131)
-        plt.title('Original Image')
-        plt.imshow(X_test[i].squeeze(), cmap='gray')
-        plt.axis('off')
-        
-        plt.subplot(132)
-        plt.title('True Mask')
-        plt.imshow(true_mask, cmap='nipy_spectral')
-        plt.axis('off')
-        
-        plt.subplot(133)
-        plt.title('Predicted Mask')
-        plt.imshow(pred_mask, cmap='nipy_spectral')
-        plt.axis('off')
-        
-        plt.tight_layout()
-        plt.savefig(f'predictions/test_example_{i}.png')
-        plt.close()
-    
-    print("Evaluation complete!")
-    return model, history, (test_loss, test_accuracy, mean_iou)
+    # Return the model and dataset information
+    return model, (X_test, y_test, categories)
 
 # Example usage
 if __name__ == "__main__":
-    # List all 5 dataset HDF5 files
-    hdf5_files = [
-        r"C:\Users\Gospel\Documents\Peregrine Dataset v2023-11\2021-08-23 TCR Phase 1 Build 1.hdf5",
-        r"C:\Users\Gospel\Documents\Peregrine Dataset v2023-11\2021-09-15 TCR Phase 1 Build 2.hdf5",
-        r"C:\Users\Gospel\Documents\Peregrine Dataset v2023-11\2021-10-01 TCR Phase 1 Build 3.hdf5",
-        r"C:\Users\Gospel\Documents\Peregrine Dataset v2023-11\2021-10-19 TCR Phase 1 Build 4.hdf5",
-        r"C:\Users\Gospel\Documents\Peregrine Dataset v2023-11\2021-11-12 TCR Phase 1 Build 5.hdf5"
-    ]
+    dataset_dir = "path/to/3d_printing_pictures"
+    model, test_data = train_and_evaluate_model(dataset_dir)
     
-    # Train and evaluate the model
-    model, history, metrics = train_and_evaluate_model(hdf5_files)
-    
-    # Save the final model
-    model.save('final_defect_segmentation_model.h5')
-    
-    # Print final results
-    test_loss, test_accuracy, mean_iou = metrics
-    print(f"\nFinal Test Results:")
-    print(f"Loss: {test_loss:.4f}")
-    print(f"Accuracy: {test_accuracy:.4f}")
-    print(f"Mean IoU: {mean_iou:.4f}")
+    # Example visualization
+    X_test, y_test, categories = test_data
+    if len(X_test) > 0:
+        # This is a placeholder - would need actual predictions
+        sample_image = X_test[0]
+        sample_boxes = y_test[0]
+        
+        # In a real implementation, you would get predictions from the model
+        # pred_boxes = model.predict(np.expand_dims(sample_image, axis=0))[0]
+        
+        # For demonstration, use the true boxes as "predictions"
+        pred_boxes = np.concatenate([sample_boxes[:, :4], 
+                                    np.ones((len(sample_boxes), 1)),  # objectness
+                                    np.eye(len(categories))[sample_boxes[:, 4].astype(int)]], axis=1)
+        
+        plt = visualize_predictions(sample_image, sample_boxes, pred_boxes, categories)
+        plt.savefig("example_detection.png")
+        plt.close()
