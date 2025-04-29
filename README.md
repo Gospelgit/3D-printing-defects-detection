@@ -15,11 +15,5 @@ Annotation Format: COCO
 Classes: Nozzle-workpiece interactions and defects
 Image Size: 416x416 (Fit within)
 
-The dataset is available for download at Roboflow Universe.
-Model Architecture
-The system uses a state-of-the-art object detection architecture to identify defects and nozzle-workpiece interactions:
+The dataset is available for download at Roboflow Universe](https://universe.roboflow.com/3d-printing/3d-printing-pictures/dataset/6.
 
-Backbone: ResNet50
-Detection Framework: RetinaNet-inspired architecture
-Input Size: 416x416
-Output: Bounding box coordinates, objectness score, and class probabilities
